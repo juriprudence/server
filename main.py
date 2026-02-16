@@ -64,9 +64,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # Handle incoming messages
         while True:
-            message = await websocket.receive_text()
             try:
-                data = json.loads(message)
+                # Use receive_json() which handles both text and binary frames automatically
+                data = await websocket.receive_json()
+                
                 # Ensure sender is correct
                 data["sender"] = player_id
                 
@@ -82,15 +83,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 payload_str = json.dumps(payload)
                 
                 # Broadcast to others
-                for ws in clients:
+                for ws in list(clients):
                     if ws != websocket:
                         try:
+                            # Use send_text for consistency, though send_json is also fine
                             await ws.send_text(payload_str)
                         except:
                             pass
                             
-            except json.JSONDecodeError:
-                logging.error("Invalid JSON received")
+            except (json.JSONDecodeError, ValueError):
+                logging.error(f"Invalid message format from Player {player_id}")
+            except WebSocketDisconnect:
+                raise # Re-raise to be caught by the outer disconnect handler
+            except Exception as e:
+                logging.error(f"Message processing error for Player {player_id}: {e}")
+                # Don't break the loop for generic errors, just log it
                 
     except WebSocketDisconnect:
         logging.info(f"Player {player_id} disconnected")
@@ -115,4 +122,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8765)
+    import os
+    port = int(os.environ.get("PORT", 8765))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
