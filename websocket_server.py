@@ -1,23 +1,30 @@
-import asyncio
-import websockets
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
 import json
 import logging
+from typing import Dict, Set
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-clients = set()
-clients_map = {} # WebSocket -> PlayerID
+app = FastAPI()
+
+clients: Set[WebSocket] = set()
+clients_map: Dict[WebSocket, int] = {}
 next_player_id = 1
 
-async def process_request(path, request_headers):
-    """Handle HTTP HEAD requests from health checks"""
-    if request_headers.get("Upgrade", "").lower() != "websocket":
-        # Return 200 OK for health checks (HEAD, GET without upgrade, etc.)
-        return (200, [], b"OK\n")
+@app.get("/", response_class=PlainTextResponse)
+@app.head("/", response_class=PlainTextResponse)
+async def health_check():
+    """Health check endpoint for Render"""
+    return "OK"
 
-async def handler(websocket):
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
     global next_player_id
+    
+    await websocket.accept()
+    
     player_id = next_player_id
     next_player_id += 1
     clients.add(websocket)
@@ -27,41 +34,43 @@ async def handler(websocket):
     
     try:
         # Send initial Join Success (as if from Photon)
-        # Emulate: window.godotPhotonEvent('join', {success: 1, actorNr: actorNr});
-        await websocket.send(json.dumps({
+        await websocket.send_text(json.dumps({
             "event": "join",
             "data": {"success": 1, "actorNr": player_id}
         }))
         
         # Notify others about new player
-        # Emulate: window.godotPhotonEvent('actorJoin', {actorNr: actor.actorNr});
         join_msg = json.dumps({
             "event": "actorJoin",
             "data": {"actorNr": player_id}
         })
         for ws in clients:
             if ws != websocket:
-                await ws.send(join_msg)
-                
+                try:
+                    await ws.send_text(join_msg)
+                except:
+                    pass
+                    
         # Notify new player about existing players
         for ws, pid in clients_map.items():
             if ws != websocket:
-                await websocket.send(json.dumps({
-                    "event": "actorJoin",
-                    "data": {"actorNr": pid}
-                }))
+                try:
+                    await websocket.send_text(json.dumps({
+                        "event": "actorJoin",
+                        "data": {"actorNr": pid}
+                    }))
+                except:
+                    pass
 
-        async for message in websocket:
+        # Handle incoming messages
+        while True:
+            message = await websocket.receive_text()
             try:
                 data = json.loads(message)
                 # Ensure sender is correct
                 data["sender"] = player_id
                 
-                # The client sends raw data like {"event": 2, "pos": ...}
-                # PhotonManager expects "event" type message with code and data.
-                # Construct payload:
-                # { "event": "event", "data": { "code": data["event"], "data": data, "sender": player_id } }
-                
+                # Construct payload
                 payload = {
                     "event": "event",
                     "data": {
@@ -75,33 +84,36 @@ async def handler(websocket):
                 # Broadcast to others
                 for ws in clients:
                     if ws != websocket:
-                        await ws.send(payload_str)
-                        
+                        try:
+                            await ws.send_text(payload_str)
+                        except:
+                            pass
+                            
             except json.JSONDecodeError:
                 logging.error("Invalid JSON received")
                 
-    except websockets.ConnectionClosed:
+    except WebSocketDisconnect:
         logging.info(f"Player {player_id} disconnected")
+    except Exception as e:
+        logging.error(f"Error: {e}")
     finally:
-        clients.remove(websocket)
-        del clients_map[websocket]
+        if websocket in clients:
+            clients.remove(websocket)
+        if websocket in clients_map:
+            del clients_map[websocket]
         
         # Notify others
         leave_msg = json.dumps({
             "event": "actorLeave",
             "data": {"actorNr": player_id}
         })
-        for ws in clients:
-            await ws.send(leave_msg)
-
-async def main():
-    async with websockets.serve(handler, "0.0.0.0", 8765, process_request=process_request):
-        logging.info("WebSocket Server started on port 8765")
-        await asyncio.Future()  # run forever
+        for ws in list(clients):
+            try:
+                await ws.send_text(leave_msg)
+            except:
+                pass
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8765)
 
