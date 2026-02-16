@@ -10,6 +10,12 @@ clients = set()
 clients_map = {} # WebSocket -> PlayerID
 next_player_id = 1
 
+async def process_request(path, request_headers):
+    """Handle HTTP HEAD requests from health checks"""
+    if request_headers.get("Upgrade", "").lower() != "websocket":
+        # Return 200 OK for health checks (HEAD, GET without upgrade, etc.)
+        return (200, [], b"OK\n")
+
 async def handler(websocket):
     global next_player_id
     player_id = next_player_id
@@ -89,7 +95,7 @@ async def handler(websocket):
             await ws.send(leave_msg)
 
 async def main():
-    async with websockets.serve(handler, "0.0.0.0", 8765):
+    async with websockets.serve(handler, "0.0.0.0", 8765, process_request=process_request):
         logging.info("WebSocket Server started on port 8765")
         await asyncio.Future()  # run forever
 
@@ -98,3 +104,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
